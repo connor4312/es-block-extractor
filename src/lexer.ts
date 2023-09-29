@@ -1,144 +1,3 @@
-
-export interface ImportSpecifier {
-  /**
-   * Module name
-   *
-   * To handle escape sequences in specifier strings, the .n field of imported specifiers will be provided where possible.
-   *
-   * For dynamic import expressions, this field will be empty if not a valid JS string.
-   *
-   * @example
-   * const [imports1, exports1] = parse(String.raw`import './\u0061\u0062.js'`);
-   * imports1[0].n;
-   * // Returns "./ab.js"
-   *
-   * const [imports2, exports2] = parse(`import("./ab.js")`);
-   * imports2[0].n;
-   * // Returns "./ab.js"
-   *
-   * const [imports3, exports3] = parse(`import("./" + "ab.js")`);
-   * imports3[0].n;
-   * // Returns undefined
-   */
-  readonly n: string | undefined;
-  /**
-   * Start of module specifier
-   *
-   * @example
-   * const source = `import { a } from 'asdf'`;
-   * const [imports, exports] = parse(source);
-   * source.substring(imports[0].s, imports[0].e);
-   * // Returns "asdf"
-   */
-  readonly s: number;
-  /**
-   * End of module specifier
-   */
-  readonly e: number;
-
-  /**
-   * Start of import statement
-   *
-   * @example
-   * const source = `import { a } from 'asdf'`;
-   * const [imports, exports] = parse(source);
-   * source.substring(imports[0].ss, imports[0].se);
-   * // Returns "import { a } from 'asdf';"
-   */
-  readonly ss: number;
-  /**
-   * End of import statement
-   */
-  readonly se: number;
-
-  /**
-   * If this import keyword is a dynamic import, this is the start value.
-   * If this import keyword is a static import, this is -1.
-   * If this import keyword is an import.meta expresion, this is -2.
-   */
-  readonly d: number;
-
-  /**
-   * If this import has an import assertion, this is the start value.
-   * Otherwise this is `-1`.
-   */
-  readonly a: number;
-}
-
-export interface ExportSpecifier {
-  /**
-   * Exported name
-   *
-   * @example
-   * const source = `export default []`;
-   * const [imports, exports] = parse(source);
-   * exports[0].n;
-   * // Returns "default"
-   *
-   * @example
-   * const source = `export const asdf = 42`;
-   * const [imports, exports] = parse(source);
-   * exports[0].n;
-   * // Returns "asdf"
-   */
-  readonly n: string;
-
-  /**
-   * Local name, or undefined.
-   *
-   * @example
-   * const source = `export default []`;
-   * const [imports, exports] = parse(source);
-   * exports[0].ln;
-   * // Returns undefined
-   *
-   * @example
-   * const asdf = 42;
-   * const source = `export { asdf as a }`;
-   * const [imports, exports] = parse(source);
-   * exports[0].ln;
-   * // Returns "asdf"
-   */
-  readonly ln: string | undefined;
-
-  /**
-   * Start of exported name
-   *
-   * @example
-   * const source = `export default []`;
-   * const [imports, exports] = parse(source);
-   * source.substring(exports[0].s, exports[0].e);
-   * // Returns "default"
-   *
-   * @example
-   * const source = `export { 42 as asdf }`;
-   * const [imports, exports] = parse(source);
-   * source.substring(exports[0].s, exports[0].e);
-   * // Returns "asdf"
-   */
-  readonly s: number;
-  /**
-   * End of exported name
-   */
-  readonly e: number;
-
-  /**
-   * Start of local name, or -1.
-   *
-   * @example
-   * const asdf = 42;
-   * const source = `export { asdf as a }`;
-   * const [imports, exports] = parse(source);
-   * source.substring(exports[0].ls, exports[0].le);
-   * // Returns "asdf"
-   */
-  readonly ls: number;
-  /**
-   * End of local name, or -1.
-   */
-  readonly le: number;
-}
-
 const isLE = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
 
 /**
@@ -147,13 +6,14 @@ const isLE = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
  *
  * @param source Source code to parser
  * @param name Optional sourcename
- * @returns Tuple contaning imports list and exports list.
+ * @returns Block types, 3 elements per block indicating:
+ *   i + 0: type of block (0 for parens, 1 for curly)
+ *   i + 1: start byte of the block
+ *   i + 2: end byte of the block
  */
-export function parse (source: string, name = '@'): readonly [
-  imports: ReadonlyArray<ImportSpecifier>,
-  exports: ReadonlyArray<ExportSpecifier>,
-  facade: boolean
-] {
+export function parse (source: string, name = '@'): {
+  blocks: Uint32Array,
+} {
   if (!wasm)
     // actually returns a promise if init hasn't resolved (not type safe).
     // casting to avoid a breaking type change.
@@ -172,33 +32,15 @@ export function parse (source: string, name = '@'): readonly [
   if (!wasm.parse())
     throw Object.assign(new Error(`Parse error ${name}:${source.slice(0, wasm.e()).split('\n').length}:${wasm.e() - source.lastIndexOf('\n', wasm.e() - 1)}`), { idx: wasm.e() });
 
-  const imports: ImportSpecifier[] = [], exports: ExportSpecifier[] = [];
-  while (wasm.ri()) {
-    const s = wasm.is(), e = wasm.ie(), a = wasm.ai(), d = wasm.id(), ss = wasm.ss(), se = wasm.se();
-    let n;
-    if (wasm.ip())
-      n = decode(source.slice(d === -1 ? s - 1 : s, d === -1 ? e + 1 : e));
-    imports.push({ n, s, e, ss, se, d, a });
-  }
-  while (wasm.re()) {
-    const s = wasm.es(), e = wasm.ee(), ls = wasm.els(), le = wasm.ele();
-    const n = source.slice(s, e), ch = n[0];
-    const ln = ls < 0 ? undefined : source.slice(ls, le), lch = ln ? ln[0] : '';
-    exports.push({
-      s, e, ls, le,
-      n: (ch === '"' || ch === "'") ? decode(n) : n,
-      ln: (lch === '"' || lch === "'") ? decode(ln) : ln,
-    });
+  let blocks = new Uint32Array(wasm.bc() * 3);
+  let blocksI = 0;
+  while (wasm.rb()) {
+    blocks[blocksI++] = wasm.bk();
+    blocks[blocksI++] = wasm.bs();
+    blocks[blocksI++] = wasm.be();
   }
 
-  function decode (str: string | undefined) {
-    try {
-      return (0, eval)(str as string) // eval(undefined) -> undefined
-    }
-    catch (e) {}
-  }
-
-  return [imports, exports, !!wasm.f()];
+  return { blocks };
 }
 
 function copyBE (src: string, outBuf16: Uint16Array) {
@@ -221,38 +63,20 @@ let wasm: {
   __heap_base: {value: number} | number & {value: undefined};
   memory: WebAssembly.Memory;
   parse(): boolean;
-  /** getAssertIndex */
-  ai(): number;
   /** getErr */
   e(): number;
-  /** getExportEnd */
-  ee(): number;
-  /** getExportLocalEnd */
-  ele(): number;
-  /** getExportLocalStart */
-  els(): number;
-  /** getExportStart */
-  es(): number;
-  /** facade */
-  f(): boolean;
-  /** getImportDynamic */
-  id(): number;
-  /** getImportEnd */
-  ie(): number;
-  /** getImportSafeString */
-  ip(): number;
-  /** getImportStart */
-  is(): number;
-  /** readExport */
-  re(): boolean;
-  /** readImport */
-  ri(): boolean;
+  /** blockCount */
+  bc(): number;
+  /** readBlock */
+  rb(): boolean;
   /** allocateSource */
   sa(utf16Len: number): number;
-  /** getImportStatementEnd */
-  se(): number;
-  /** getImportStatementStart */
-  ss(): number;
+  /** getBlockKind */
+  bk(): number;
+  /** getBlockStart */
+  bs(): number;
+  /** getBlockEnd */
+  be(): number;
 };
 
 

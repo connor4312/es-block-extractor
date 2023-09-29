@@ -28,6 +28,9 @@ static const char16_t BREA[] = { 'b', 'r', 'e', 'a' };
 static const char16_t CONTIN[] = { 'c', 'o', 'n', 't', 'i', 'n' };
 static const char16_t SYNC[] = {'s', 'y', 'n', 'c'};
 static const char16_t UNCTION[] = {'u', 'n', 'c', 't', 'i', 'o', 'n'};
+static const char16_t ONST[] = {'o', 'n', 's', 't'};
+static const char16_t ET[] = {'e', 't'};
+static const char16_t AR[] = {'a', 'r'};
 
 // Note: parsing is based on the _assumption_ that the source is already valid
 bool parse () {
@@ -35,24 +38,20 @@ bool parse () {
   // these are done here to avoid data section \0\0\0 repetition bloat
   // (while gzip fixes this, still better to have ~10KiB ungzipped over ~20KiB)
   OpenToken openTokenStack_[1024];
-  Import* dynamicImportStack_[512];
 
-  facade = true;
-  dynamicImportStackDepth = 0;
   openTokenDepth = 0;
   lastTokenPos = (char16_t*)EMPTY_CHAR;
   lastSlashWasDivision = false;
   parse_error = 0;
   has_error = false;
+  nextBraceOrParenDestructures = false;
   openTokenStack = &openTokenStack_[0];
-  dynamicImportStack = &dynamicImportStack_[0];
   nextBraceIsClass = false;
 
   pos = (char16_t*)(source - 1);
   char16_t ch = '\0';
   end = pos + sourceLen;
 
-  // start with a pure "module-only" parser
   while (pos++ < end) {
     ch = *pos;
 
@@ -60,103 +59,63 @@ bool parse () {
       continue;
 
     switch (ch) {
-      case 'e':
-        if (openTokenDepth == 0 && keywordStart(pos) && memcmp(pos + 1, &XPORT[0], 5 * 2) == 0) {
-          tryParseExportStatement();
-          // export might have been a non-pure declaration
-          if (!facade) {
-            lastTokenPos = pos;
-            goto mainparse;
-          }
-        }
-        break;
       case 'i':
-        if (keywordStart(pos) && memcmp(pos + 1, &MPORT[0], 5 * 2) == 0)
-          tryParseImportStatement();
-        break;
-      case ';':
-        break;
-      case '/': {
-        char16_t next_ch = *(pos + 1);
-        if (next_ch == '/') {
-          lineComment();
-          // dont update lastToken
-          continue;
+        if (isKeyword(MPORT, 5)) {
+          nextBraceOrParenDestructures = true;
         }
-        else if (next_ch == '*') {
-          blockComment(true);
-          // dont update lastToken
-          continue;
-        }
-        // fallthrough
-      }
-      default:
-        // as soon as we hit a non-module token, we go to main parser
-        facade = false;
-        pos--;
-        goto mainparse; // oh yeahhh
-    }
-    lastTokenPos = pos;
-  }
-
-  if (has_error)
-    return false;
-
-  mainparse: while (pos++ < end) {
-    ch = *pos;
-
-    if (ch == 32 || ch < 14 && ch > 8)
-      continue;
-
-    switch (ch) {
-      case 'e':
-        if (openTokenDepth == 0 && keywordStart(pos) && memcmp(pos + 1, &XPORT[0], 5 * 2) == 0)
-          tryParseExportStatement();
         break;
-      case 'i':
-        if (keywordStart(pos) && memcmp(pos + 1, &MPORT[0], 5 * 2) == 0)
-          tryParseImportStatement();
+      case 'l':
+        if (isKeyword(ET, 2)) {
+          nextBraceOrParenDestructures = true;
+        }
+        break;
+      case 'v':
+        if (isKeyword(AR, 2)) {
+          nextBraceOrParenDestructures = true;
+        }
         break;
       case 'c':
-        if (keywordStart(pos) && memcmp(pos + 1, &LASS[0], 4 * 2) == 0 && isBrOrWs(*(pos + 5)))
+        if (isKeyword(ONST, 4)) {
+          nextBraceOrParenDestructures = true;
+        } else if (isKeyword(LASS, 5)) {
           nextBraceIsClass = true;
+        }
         break;
-      case '(':
-        openTokenStack[openTokenDepth].token = AnyParen;
+      case '=':
+        nextBraceOrParenDestructures = false;
+        break;
+      case '[':
+        openTokenStack[openTokenDepth].token = nextBraceOrParenDestructures ? DestructuringBracket : AnyBracket;
         openTokenStack[openTokenDepth++].pos = lastTokenPos;
+        nextBraceOrParenDestructures = false;
         break;
-      case ')':
+      case ']':
         if (openTokenDepth == 0)
           return syntaxError(), false;
         openTokenDepth--;
-        if (dynamicImportStackDepth > 0 && openTokenStack[openTokenDepth].token == ImportParen) {
-          Import* cur_dynamic_import = dynamicImportStack[dynamicImportStackDepth - 1];
-          if (cur_dynamic_import->end == 0)
-            cur_dynamic_import->end = pos;
-          cur_dynamic_import->statement_end = pos + 1;
-          dynamicImportStackDepth--;
-        }
         break;
       case '{':
-        // dynamic import followed by { is not a dynamic import (so remove)
-        // this is a sneaky way to get around { import () {} } v { import () }
-        // block / object ambiguity without a parser (assuming source is valid)
-        if (*lastTokenPos == ')' && import_write_head && import_write_head->end == lastTokenPos) {
-          import_write_head = import_write_head_last;
-          if (import_write_head)
-            import_write_head->next = NULL;
-          else
-            first_import = NULL;
-        }
-        openTokenStack[openTokenDepth].token = nextBraceIsClass ? ClassBrace : AnyBrace;
+        openTokenStack[openTokenDepth].token =
+          nextBraceIsClass
+          ? ClassBrace
+          : nextBraceOrParenDestructures || *lastTokenPos == '(' || (openTokenDepth > 0 && (openTokenStack[openTokenDepth - 1].token == DestructuringBrace || openTokenStack[openTokenDepth - 1].token == DestructuringBracket))
+          ? DestructuringBrace
+          : AnyBrace;
         openTokenStack[openTokenDepth++].pos = lastTokenPos;
         nextBraceIsClass = false;
         break;
       case '}':
         if (openTokenDepth == 0)
           return syntaxError(), false;
-        if (openTokenStack[--openTokenDepth].token == TemplateBrace) {
-          templateString();
+        switch (openTokenStack[--openTokenDepth].token) {
+          case TemplateBrace:
+            templateString();
+            break;
+          case AnyBrace:
+            addBlock(openTokenStack[openTokenDepth].pos, pos, ParenBlock);
+            break;
+          default:
+            break;
         }
         break;
       case '\'':
@@ -219,474 +178,11 @@ bool parse () {
     lastTokenPos = pos;
   }
 
-  if (openTokenDepth || has_error || dynamicImportStackDepth)
+  if (openTokenDepth || has_error)
     return false;
 
   // succeess
   return true;
-}
-
-void tryParseImportStatement () {
-  char16_t* startPos = pos;
-
-  pos += 6;
-
-  char16_t ch = commentWhitespace(true);
-
-  switch (ch) {
-    // dynamic import
-    case '(':
-      openTokenStack[openTokenDepth].token = ImportParen;
-      openTokenStack[openTokenDepth++].pos = pos;
-      if (*lastTokenPos == '.')
-        return;
-      // dynamic import indicated by positive d
-      char16_t* dynamicPos = pos;
-      // try parse a string, to record a safe dynamic import string
-      pos++;
-      ch = commentWhitespace(true);
-      addImport(startPos, pos, 0, dynamicPos);
-      dynamicImportStack[dynamicImportStackDepth++] = import_write_head;
-      if (ch == '\'') {
-        stringLiteral(ch);
-      }
-      else if (ch == '"') {
-        stringLiteral(ch);
-      }
-      else {
-        pos--;
-        return;
-      }
-      pos++;
-      char16_t* endPos = pos;
-      ch = commentWhitespace(true);
-      if (ch == ',') {
-        pos++;
-        ch = commentWhitespace(true);
-        import_write_head->end = endPos;
-        import_write_head->assert_index = pos;
-        import_write_head->safe = true;
-        pos--;
-      }
-      else if (ch == ')') {
-        openTokenDepth--;
-        import_write_head->end = endPos;
-        import_write_head->statement_end = pos + 1;
-        import_write_head->safe = true;
-        dynamicImportStackDepth--;
-      }
-      else {
-        pos--;
-      }
-      return;
-    // import.meta
-    case '.':
-      pos++;
-      ch = commentWhitespace(true);
-      // import.meta indicated by d == -2
-      if (ch == 'm' && memcmp(pos + 1, &ETA[0], 3 * 2) == 0 && (isSpread(lastTokenPos) || *lastTokenPos != '.'))
-        addImport(startPos, startPos, pos + 4, IMPORT_META);
-      return;
-
-    default:
-      // no space after "import" -> not an import keyword
-      if (pos == startPos + 6) {
-        pos--;
-        break;
-      }
-    case '"':
-    case '\'':
-    case '*': {
-      // import statement only permitted at base-level
-      if (openTokenDepth != 0) {
-        pos--;
-        return;
-      }
-      while (pos < end) {
-        ch = *pos;
-        if (isQuote(ch)) {
-          readImportString(startPos, ch);
-          return;
-        }
-        pos++;
-      }
-      syntaxError();
-      break;
-    }
-
-    case '{': {
-      // import statement only permitted at base-level
-      if (openTokenDepth != 0) {
-        pos--;
-        return;
-      }
-
-      while (pos < end) {
-        ch = commentWhitespace(true);
-
-        if (isQuote(ch)) {
-          stringLiteral(ch);
-        } else if (ch == '}') {
-          pos++;
-          break;
-        }
-
-        pos++;
-      }
-
-      ch = commentWhitespace(true);
-      if (ch == 'f' && memcmp(pos + 1, &ROM[0], 3 * 2) != 0) {
-        syntaxError();
-        break;
-      }
-
-      pos += 4;
-      ch = commentWhitespace(true);
-
-      if (!isQuote(ch)) {
-        return syntaxError();
-      }
-
-      readImportString(startPos, ch);
-
-      break;
-    }
-  }
-}
-
-void tryParseExportStatement () {
-  char16_t* sStartPos = pos;
-  Export* prev_export_write_head = export_write_head;
-
-  pos += 6;
-
-  char16_t* curPos = pos;
-
-  char16_t ch = commentWhitespace(true);
-
-  if (pos == curPos && !isPunctuator(ch))
-    return;
-
-  if (ch == '{') {
-    pos++;
-    ch = commentWhitespace(true);
-    while (true) {
-      char16_t* startPos = pos;
-
-      if (!isQuote(ch)) {
-        ch = readToWsOrPunctuator(ch);
-      }
-      // export { "identifer" as } from
-      // export { "@notid" as } from
-      // export { "spa ce" as } from
-      // export { " space" as } from
-      // export { "space " as } from
-      // export { "not~id" as } from
-      // export { "%notid" as } from
-      // export { "identifer" } from
-      // export { "%notid" } from
-      else {
-        stringLiteral(ch);
-        pos++;
-      }
-
-      char16_t* endPos = pos;
-      commentWhitespace(true);
-      ch = readExportAs(startPos, endPos);
-      // ,
-      if (ch == ',') {
-        pos++;
-        ch = commentWhitespace(true);
-      }
-      if (ch == '}')
-        break;
-      if (pos == startPos)
-        return syntaxError();
-      if (pos > end)
-        return syntaxError();
-    }
-    pos++;
-    ch = commentWhitespace(true);
-  }
-  // export *
-  // export * as X
-  else if (ch == '*') {
-    pos++;
-    commentWhitespace(true);
-    ch = readExportAs(pos, pos);
-    ch = commentWhitespace(true);
-  }
-  else {
-    facade = false;
-    switch (ch) {
-      // export default ...
-      case 'd': {
-        const char16_t* startPos = pos;
-        pos += 7;
-        ch = commentWhitespace(true);
-        bool localName = false;
-        switch (ch) {
-          // export default async? function*? name? (){}
-          case 'a':
-            if (memcmp(pos + 1, &SYNC[0], 4 * 2) == 0 && isWsNotBr(*(pos + 5))) {
-              pos += 5;
-              ch = commentWhitespace(false);
-            }
-            else {
-              break;
-            }
-          // fallthrough
-          case 'f':
-            if (memcmp(pos + 1, &UNCTION[0], 7 * 2) == 0 && (isBrOrWs(*(pos + 8)) || *(pos + 8) == '*' || *(pos + 8) == '(')) {
-              pos += 8;
-              ch = commentWhitespace(true);
-              if (ch == '*') {
-                pos++;
-                ch = commentWhitespace(true);
-              }
-              if (ch == '(') {
-                break;
-              }
-              localName = true;
-            }
-            break;
-          case 'c':
-            // export default class name? {}
-            if (memcmp(pos + 1, &LASS[0], 4 * 2) == 0 && (isBrOrWs(*(pos + 5)) || *(pos + 5) == '{')) {
-              pos += 5;
-              ch = commentWhitespace(true);
-              if (ch == '{') {
-                break;
-              }
-              localName = true;
-            }
-            break;
-        }
-        if (localName) {
-          const char16_t* localStartPos = pos;
-          readToWsOrPunctuator(ch);
-          if (pos > localStartPos) {
-            addExport(startPos, startPos + 7, localStartPos, pos);
-            pos--;
-            return;
-          }
-        }
-        addExport(startPos, startPos + 7, NULL, NULL);
-        pos = (char16_t*)(startPos + 6);
-        return;
-      }
-      // export async? function*? name () {
-      case 'a':
-        pos += 5;
-        commentWhitespace(false);
-      // fallthrough
-      case 'f':
-        pos += 8;
-        ch = commentWhitespace(true);
-        if (ch == '*') {
-          pos++;
-          ch = commentWhitespace(true);
-        }
-        const char16_t* startPos = pos;
-        ch = readToWsOrPunctuator(ch);
-        addExport(startPos, pos, startPos, pos);
-        pos--;
-        return;
-
-      // export class name ...
-      case 'c':
-        if (memcmp(pos + 1, &LASS[0], 4 * 2) == 0 && isBrOrWsOrPunctuatorNotDot(*(pos + 5))) {
-          pos += 5;
-          ch = commentWhitespace(true);
-          const char16_t* startPos = pos;
-          ch = readToWsOrPunctuator(ch);
-          addExport(startPos, pos, startPos, pos);
-          pos--;
-          return;
-        }
-        pos += 2;
-      // fallthrough
-
-      // export var/let/const name = ...(, name = ...)+
-      case 'v':
-      case 'l':
-        // simple declaration lexing only handles names. Any syntax after variable equals is skipped
-        // (export var p = function () { ... }, q = 5 skips "q")
-        pos += 3;
-        facade = false;
-        ch = commentWhitespace(true);
-        startPos = pos;
-        ch = readToWsOrPunctuator(ch);
-        // very basic destructuring support only of the singular form:
-        //   export const { a, b, ...c }
-        // without aliasing, nesting or defaults
-        bool destructuring = ch == '{' || ch == '[';
-        const char16_t* destructuringPos = pos;
-        if (destructuring) {
-          pos += 1;
-          ch = commentWhitespace(true);
-          startPos = pos;
-          ch = readToWsOrPunctuator(ch);
-        }
-        do {
-          if (pos == startPos)
-            break;
-          addExport(startPos, pos, startPos, pos);
-          ch = commentWhitespace(true);
-          if (destructuring && (ch == '}' || ch == ']')) {
-            destructuring = false;
-            break;
-          }
-          if (ch != ',') {
-            pos -= 1;
-            break;
-          }
-          pos++;
-          ch = commentWhitespace(true);
-          startPos = pos;
-          // internal destructurings unsupported
-          if (ch == '{' || ch == '[') {
-            pos -= 1;
-            break;
-          }
-          ch = readToWsOrPunctuator(ch);
-        } while (true);
-        // if stuck inside destructuring syntax, backtrack
-        if (destructuring) {
-          pos = (char16_t*)destructuringPos - 1;
-        }
-        return;
-
-      default:
-        return;
-    }
-  }
-
-  // from ...
-  if (ch == 'f' && memcmp(pos + 1, &ROM[0], 3 * 2) == 0) {
-    pos += 4;
-    readImportString(sStartPos, commentWhitespace(true));
-
-    // There were no local names.
-    for (Export* exprt = prev_export_write_head == NULL ? first_export : prev_export_write_head->next; exprt != NULL; exprt = exprt->next) {
-      exprt->local_start = exprt->local_end = NULL;
-    }
-  }
-  else {
-    pos--;
-  }
-}
-
-char16_t readExportAs (char16_t* startPos, char16_t* endPos) {
-  char16_t ch = *pos;
-  char16_t* localStartPos = startPos == endPos ? NULL : startPos;
-  char16_t* localEndPos = startPos == endPos ? NULL : endPos;
-
-  if (ch == 'a') {
-    pos += 2;
-    ch = commentWhitespace(true);
-    startPos = pos;
-
-    if (!isQuote(ch)) {
-      ch = readToWsOrPunctuator(ch);
-    }
-    // export { mod as "identifer" } from
-    // export { mod as "@notid" } from
-    // export { mod as "spa ce" } from
-    // export { mod as " space" } from
-    // export { mod as "space " } from
-    // export { mod as "not~id" } from
-    // export { mod as "%notid" } from
-    else {
-      stringLiteral(ch);
-      pos++;
-    }
-
-    endPos = pos;
-
-    ch = commentWhitespace(true);
-  }
-
-  if (pos != startPos)
-    addExport(startPos, endPos, localStartPos, localEndPos);
-  return ch;
-}
-
-void readImportString (const char16_t* ss, char16_t ch) {
-  const char16_t* startPos = pos + 1;
-  if (ch == '\'') {
-    stringLiteral(ch);
-  }
-  else if (ch == '"') {
-    stringLiteral(ch);
-  }
-  else {
-    syntaxError();
-    return;
-  }
-  addImport(ss, startPos, pos, STANDARD_IMPORT);
-  pos++;
-  ch = commentWhitespace(false);
-  if (!(ch == 'a' && memcmp(pos + 1, &SSERT[0], 5 * 2) == 0) && !(ch == 'w' && *(pos + 1) == 'i' && *(pos + 2) == 't' && *(pos + 3) == 'h')) {
-    pos--;
-    return;
-  }
-  char16_t* assertIndex = pos;
-  pos += ch == 'a' ? 6 : 4;
-  ch = commentWhitespace(true);
-  if (ch != '{') {
-    pos = assertIndex;
-    return;
-  }
-  const char16_t* assertStart = pos;
-  do {
-    pos++;
-    ch = commentWhitespace(true);
-    if (ch == '\'') {
-      stringLiteral(ch);
-      pos++;
-      ch = commentWhitespace(true);
-    }
-    else if (ch == '"') {
-      stringLiteral(ch);
-      pos++;
-      ch = commentWhitespace(true);
-    }
-    else {
-      ch = readToWsOrPunctuator(ch);
-    }
-    if (ch != ':') {
-      pos = assertIndex;
-      return;
-    }
-    pos++;
-    ch = commentWhitespace(true);
-    if (ch == '\'') {
-      stringLiteral(ch);
-    }
-    else if (ch == '"') {
-      stringLiteral(ch);
-    }
-    else {
-      pos = assertIndex;
-      return;
-    }
-    pos++;
-    ch = commentWhitespace(true);
-    if (ch == ',') {
-      pos++;
-      ch = commentWhitespace(true);
-      if (ch == '}')
-        break;
-      continue;
-    }
-    if (ch == '}')
-      break;
-    pos = assertIndex;
-    return;
-  } while (true);
-  import_write_head->assert_index = assertStart;
-  import_write_head->statement_end = pos + 1;
 }
 
 char16_t commentWhitespace (bool br) {
@@ -976,6 +472,16 @@ bool isExpressionTerminator (char16_t* curPos) {
     case 'e':
       return readPrecedingKeywordn(curPos - 1, &ELS[0], 3);
   }
+  return false;
+}
+
+// if the keyword is pointed to by `pos`, advances the position that amount and returns true
+bool isKeyword(const char16_t* suffix, size_t suffix_len) {
+  if (keywordStart(pos) && memcmp(pos + 1, suffix, suffix_len * 2) == 0) {
+    pos += suffix_len; // suffix_len instead of suffix_len - 1 since the parse loop will have cheked the prefix letter
+    return true;
+  }
+
   return false;
 }
 

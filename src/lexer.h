@@ -5,8 +5,6 @@
 typedef unsigned short char16_t;
 extern unsigned char __heap_base;
 
-const char16_t* STANDARD_IMPORT = (char16_t*)0x1;
-const char16_t* IMPORT_META = (char16_t*)0x2;
 const char16_t __empty_char = '\0';
 const char16_t* EMPTY_CHAR = &__empty_char;
 const char16_t* source = (void*)&__heap_base;
@@ -15,17 +13,18 @@ void setSource (void* ptr) {
   source = ptr;
 }
 
-struct Import {
-  const char16_t* start;
-  const char16_t* end;
-  const char16_t* statement_start;
-  const char16_t* statement_end;
-  const char16_t* assert_index;
-  const char16_t* dynamic;
-  bool safe;
-  struct Import* next;
+enum BlockKind {
+  ParenBlock,
+  CurlyBlock,
 };
-typedef struct Import Import;
+
+struct Block {
+  const char16_t *start;
+  const char16_t *end;
+  enum BlockKind kind;
+  struct Block *next;
+};
+typedef struct Block Block;
 
 // Paren = odd, Brace = even
 enum OpenTokenState {
@@ -35,7 +34,9 @@ enum OpenTokenState {
   TemplateBrace = 4, // ${
   ImportParen = 5, // import(),
   ClassBrace = 6,
-  AsyncParen = 7, // async()
+  AnyBracket = 7, // [
+  DestructuringBracket = 8, // [ that destructures
+  DestructuringBrace = 9, // { that destructures
 };
 
 struct OpenToken {
@@ -53,25 +54,22 @@ struct Export {
 };
 typedef struct Export Export;
 
-Import* first_import = NULL;
-Export* first_export = NULL;
-Import* import_read_head = NULL;
-Export* export_read_head = NULL;
-Import* import_write_head = NULL;
-Import* import_write_head_last = NULL;
-Export* export_write_head = NULL;
-void* analysis_base;
-void* analysis_head;
+Block *first_block = NULL;
+Block *block_read_head = NULL;
+Block *block_write_head = NULL;
+Block *block_write_head_last = NULL;
+uint32_t block_count = 0;
+void *analysis_base;
+void *analysis_head;
+bool nextBraceOrParenDestructures;
 
-bool facade;
 bool lastSlashWasDivision;
+bool inDeclarationStatement;
 uint16_t openTokenDepth;
-char16_t* lastTokenPos;
-char16_t* pos;
-char16_t* end;
-OpenToken* openTokenStack;
-uint16_t dynamicImportStackDepth;
-Import** dynamicImportStack;
+char16_t *lastTokenPos;
+char16_t *pos;
+char16_t *end;
+OpenToken *openTokenStack;
 bool nextBraceIsClass;
 
 // Memory Structure:
@@ -86,144 +84,64 @@ void bail (uint32_t err);
 // allocateSource
 const char16_t* sa (uint32_t utf16Len) {
   sourceLen = utf16Len;
-  const char16_t* sourceEnd = source + utf16Len + 1;
+  const char16_t *sourceEnd = source + utf16Len + 1;
   // ensure source is null terminated
-  *(char16_t*)(source + utf16Len) = '\0';
-  analysis_base = (void*)sourceEnd;
+  *(char16_t *)(source + utf16Len) = '\0';
+  analysis_base = (void *)sourceEnd;
   analysis_head = analysis_base;
-  first_import = NULL;
-  import_write_head = NULL;
-  import_read_head = NULL;
-  first_export = NULL;
-  export_write_head = NULL;
-  export_read_head = NULL;
+  first_block = NULL;
+  block_write_head = NULL;
+  block_read_head = NULL;
+  block_count = 0;
   return source;
 }
 
-void addImport (const char16_t* statement_start, const char16_t* start, const char16_t* end, const char16_t* dynamic) {
-  Import* import = (Import*)(analysis_head);
-  analysis_head = analysis_head + sizeof(Import);
-  if (import_write_head == NULL)
-    first_import = import;
+void addBlock(const char16_t *start, const char16_t *end, enum BlockKind kind) {
+  Block *import = (Block *)(analysis_head);
+  analysis_head = analysis_head + sizeof(Block);
+  if (block_write_head == NULL)
+    first_block = import;
   else
-    import_write_head->next = import;
-  import_write_head_last = import_write_head;
-  import_write_head = import;
-  import->statement_start = statement_start;
-  if (dynamic == IMPORT_META)
-    import->statement_end = end;
-  else if (dynamic == STANDARD_IMPORT)
-    import->statement_end = end + 1;
-  else 
-    import->statement_end = 0;
+    block_write_head->next = import;
+  block_write_head_last = block_write_head;
+  block_write_head = import;
   import->start = start;
   import->end = end;
-  import->assert_index = 0;
-  import->dynamic = dynamic;
-  import->safe = dynamic == STANDARD_IMPORT;
+  import->kind = kind;
   import->next = NULL;
-}
-
-void addExport (const char16_t* start, const char16_t* end, const char16_t* local_start, const char16_t* local_end) {
-  Export* export = (Export*)(analysis_head);
-  analysis_head = analysis_head + sizeof(Export);
-  if (export_write_head == NULL)
-    first_export = export;
-  else
-    export_write_head->next = export;
-  export_write_head = export;
-  export->start = start;
-  export->end = end;
-  export->local_start = local_start;
-  export->local_end = local_end;
-  export->next = NULL;
+  block_count++;
 }
 
 // getErr
-uint32_t e () {
-  return parse_error;
-}
+uint32_t e() { return parse_error; }
 
-// getImportStart
-uint32_t is () {
-  return import_read_head->start - source;
-}
-// getImportEnd
-uint32_t ie () {
-  return import_read_head->end == 0 ? -1 : import_read_head->end - source;
-}
-// getImportStatementStart
-uint32_t ss () {
-  return import_read_head->statement_start - source;
-}
-// getImportStatementEnd
-uint32_t se () {
-  return import_read_head->statement_end == 0 ? -1 : import_read_head->statement_end - source;
-}
-// getAssertIndex
-uint32_t ai () {
-  return import_read_head->assert_index == 0 ? -1 : import_read_head->assert_index - source;
-}
-// getImportDynamic
-uint32_t id () {
-  const char16_t* dynamic = import_read_head->dynamic;
-  if (dynamic == STANDARD_IMPORT)
-    return -1;
-  else if (dynamic == IMPORT_META)
-    return -2;
-  return import_read_head->dynamic - source;
-}
-// getImportSafeString
-uint32_t ip () {
-  return import_read_head->safe;
-}
-// getExportStart
-uint32_t es () {
-  return export_read_head->start - source;
-}
-// getExportEnd
-uint32_t ee () {
-  return export_read_head->end - source;
-}
-// getExportLocalStart
-int32_t els () {
-  return export_read_head->local_start ? export_read_head->local_start - source : -1;
-}
-// getExportLocalEnd
-int32_t ele () {
-  return export_read_head->local_end ? export_read_head->local_end - source : -1;
-}
-// readImport
-bool ri () {
-  if (import_read_head == NULL)
-    import_read_head = first_import;
+// getBlockCount
+uint32_t bc() { return block_count; }
+// getBlockStart
+uint32_t bs() { return block_read_head->start - source; }
+// getBlockEnd
+uint32_t be() { return block_read_head->end - source; }
+// getBlockEnd
+uint32_t bk() { return (uint32_t)block_read_head->kind ; }
+// readBlock
+bool rb () {
+  if (block_read_head == NULL)
+    block_read_head = first_block;
   else
-    import_read_head = import_read_head->next;
-  if (import_read_head == NULL)
+    block_read_head = block_read_head->next;
+  if (block_read_head == NULL)
     return false;
   return true;
 }
-// readExport
-bool re () {
-  if (export_read_head == NULL)
-    export_read_head = first_export;
-  else
-    export_read_head = export_read_head->next;
-  if (export_read_head == NULL)
-    return false;
-  return true;
-}
-bool f () {
-  return facade;
-}
 
-bool parse ();
+bool parse();
 
 void tryParseImportStatement ();
 void tryParseExportStatement ();
 
 void readImportString (const char16_t* ss, char16_t ch);
 char16_t readExportAs (char16_t* startPos, char16_t* endPos);
+bool isKeyword(const char16_t* suffix, size_t suffix_len);
 
 char16_t commentWhitespace (bool br);
 void regularExpression ();

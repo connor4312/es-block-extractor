@@ -1,0 +1,25 @@
+{
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Debug WASM",
+      // specified explicitly to avoid emsdk from overriding it; wasm debugging
+      // doesn't work well in the older version of V8 that emsdk uses
+      "runtimeExecutable": "/usr/local/bin/node",
+      "program": "./node_modules/.bin/mocha",
+      "args": ["-b", "-u", "tdd", "test/*.cjs"],
+      "trace": {
+        "logFile": "${workspaceFolder}/log.txt"
+      },
+      "env": {
+        "WASM": "1"
+      },
+      "outFiles": []
+    }
+  ]
+}
